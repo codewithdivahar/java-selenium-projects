@@ -21,8 +21,6 @@ pipeline {
     environment {
         MAVEN_OPTS = '-Xmx1024m'
         PROJECT_DIR = 'SauceDemoSeleniumTest'
-        // Will be set dynamically if we start a Selenium container
-        SELENIUM_REMOTE_URL = ''
     }
 
     stages {
@@ -38,51 +36,92 @@ pipeline {
             }
         }
 
+        stage('Install Chrome (if missing)') {
+            steps {
+                sh '''
+                  set -eux
+
+                  # Already present?
+                  if command -v google-chrome >/dev/null 2>&1; then
+                    echo "Found existing Chrome: $(google-chrome --version)"
+                    exit 0
+                  fi
+                  if command -v chromium >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1; then
+                    echo "Found existing Chromium."
+                    # Ensure a google-chrome alias exists
+                    if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; else SUDO=""; fi
+                    $SUDO ln -sf "$(command -v chromium || command -v chromium-browser)" /usr/local/bin/google-chrome || true
+                    google-chrome --version || true
+                    exit 0
+                  fi
+
+                  # Detect OS family
+                  OS_ID="$(. /etc/os-release 2>/dev/null || true; echo ${ID:-})"
+                  if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; else SUDO=""; fi
+
+                  if [ "$OS_ID" = "ubuntu" ] || [ "$OS_ID" = "debian" ]; then
+                    # Debian/Ubuntu: install Google Chrome, fallback to Chromium
+                    $SUDO apt-get update
+                    $SUDO apt-get install -y wget gnupg ca-certificates
+                    $SUDO install -m 0755 -d /etc/apt/keyrings
+                    wget -qO- https://dl.google.com/linux/linux_signing_key.pub | \
+                      $SUDO gpg --dearmor -o /etc/apt/keyrings/google-linux.gpg
+                    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-linux.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | \
+                      $SUDO tee /etc/apt/sources.list.d/google-chrome.list
+                    $SUDO apt-get update
+                    # Try Chrome first
+                    $SUDO apt-get install -y google-chrome-stable || true
+
+                    if ! command -v google-chrome >/dev/null 2>&1; then
+                      echo "Chrome install failed or repo blocked; falling back to Chromium."
+                      $SUDO apt-get install -y chromium || $SUDO apt-get install -y chromium-browser || true
+                      if command -v chromium >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1; then
+                        $SUDO ln -sf "$(command -v chromium || command -v chromium-browser)" /usr/local/bin/google-chrome || true
+                      else
+                        echo "ERROR: Could not install Chrome/Chromium on Debian/Ubuntu."
+                        exit 1
+                      fi
+                    fi
+
+                  elif command -v dnf >/dev/null 2>&1; then
+                    # RHEL/CentOS/Rocky/Alma: install Chromium and alias it
+                    $SUDO dnf -y install epel-release || true
+                    $SUDO dnf -y install chromium
+                    if ! command -v chromium >/dev/null 2>&1; then
+                      echo "ERROR: Could not install Chromium with dnf."
+                      exit 1
+                    fi
+                    $SUDO ln -sf "$(command -v chromium)" /usr/local/bin/google-chrome || true
+
+                  elif command -v yum >/dev/null 2>&1; then
+                    $SUDO yum -y install epel-release || true
+                    $SUDO yum -y install chromium
+                    if ! command -v chromium >/dev/null 2>&1; then
+                      echo "ERROR: Could not install Chromium with yum."
+                      exit 1
+                    fi
+                    $SUDO ln -sf "$(command -v chromium)" /usr/local/bin/google-chrome || true
+
+                  else
+                    echo "ERROR: Unsupported OS for auto-install, or missing package manager."
+                    echo "Please install Google Chrome/Chromium manually on this agent."
+                    exit 1
+                  fi
+
+                  google-chrome --version || true
+                '''
+            }
+        }
+
         stage('Environment Check') {
             steps {
                 echo 'Checking environment and project structure...'
                 sh 'java -version'
                 sh 'mvn -version'
-                sh 'command -v google-chrome >/dev/null 2>&1 && google-chrome --version || echo "google-chrome not found"'
+                sh 'google-chrome --version || true'
                 sh 'ls -la'
                 sh "ls -la ${env.PROJECT_DIR}/"
                 sh "ls -la ${env.PROJECT_DIR}/src/ || echo 'No src directory'"
-            }
-        }
-
-        stage('Browser/Driver Provisioning') {
-            steps {
-                script {
-                    // Try local Chrome first; if not present, try to spin up Selenium container
-                    def hasChrome = sh(script: 'command -v google-chrome >/dev/null 2>&1', returnStatus: true) == 0
-                    if (hasChrome) {
-                        echo 'Local Google Chrome found. Tests will run via local Chrome + WebDriverManager.'
-                    } else {
-                        echo 'Local Google Chrome not found.'
-                        def hasDocker = sh(script: 'command -v docker >/dev/null 2>&1', returnStatus: true) == 0
-                        if (hasDocker) {
-                            echo 'Starting Selenium standalone Chrome container...'
-                            sh '''
-                              set -eux
-                              docker rm -f selenium || true
-                              docker run -d --name selenium -p 4444:4444 -p 7900:7900 --shm-size="2g" selenium/standalone-chrome:126.0
-                              # wait for Grid up
-                              timeout 60 bash -c 'until curl -sf http://localhost:4444/wd/hub/status | grep -q "\"ready\": true"; do sleep 2; done'
-                            '''
-                            env.SELENIUM_REMOTE_URL = 'http://localhost:4444/wd/hub'
-                            echo "Selenium Grid is up at ${env.SELENIUM_REMOTE_URL}"
-                        } else {
-                            echo '''
-                            Neither local Google Chrome nor Docker is available.
-                            Options:
-                              1) Install Google Chrome on this agent; or
-                              2) Install Docker and let the pipeline start selenium/standalone-chrome; or
-                              3) Configure a Jenkins agent that has Chrome.
-                            '''
-                            error('No browser available for UI tests.')
-                        }
-                    }
-                }
             }
         }
 
@@ -103,7 +142,6 @@ pipeline {
                 echo 'Running Selenium tests...'
                 dir(env.PROJECT_DIR) {
                     script {
-                        // Base command built from your params
                         def testCommand = "mvn test -P${params.BROWSER}"
                         if (params.BROWSER == 'chrome-headless') {
                             testCommand += " -Dheadless=true"
@@ -112,33 +150,14 @@ pipeline {
                             testCommand += " -Dtest=*${params.TEST_SUITE.capitalize()}Test"
                         }
 
-                        // If we started a Selenium container, tell tests to use RemoteWebDriver
-                        // Your BaseTest should look for SELENIUM_REMOTE_URL and use RemoteWebDriver when set.
-                        if (env.SELENIUM_REMOTE_URL?.trim()) {
-                            echo "Using Selenium Grid at ${env.SELENIUM_REMOTE_URL}"
-                            withEnv(["SELENIUM_REMOTE_URL=${env.SELENIUM_REMOTE_URL}", "browser=chrome"]) {
-                                echo "Executing command: ${testCommand} (RemoteWebDriver)"
-                                try {
-                                    sh testCommand
-                                    echo "Tests completed successfully (remote)."
-                                } catch (Exception e) {
-                                    echo "Tests failed but continuing with reports: ${e.message}"
-                                    currentBuild.result = 'UNSTABLE'
-                                } finally {
-                                    // stop selenium container
-                                    sh 'docker rm -f selenium || true'
-                                }
-                            }
-                        } else {
-                            // Local Chrome path (WebDriverManager will fetch matching chromedriver)
-                            echo "Executing command: ${testCommand} (local Chrome)"
-                            try {
-                                sh testCommand
-                                echo "Tests completed successfully (local)."
-                            } catch (Exception e) {
-                                echo "Tests failed but continuing with reports: ${e.message}"
-                                currentBuild.result = 'UNSTABLE'
-                            }
+                        echo "Executing command: ${testCommand}"
+
+                        try {
+                            sh testCommand
+                            echo "Tests completed successfully!"
+                        } catch (Exception e) {
+                            echo "Tests failed but continuing with reports: ${e.message}"
+                            currentBuild.result = 'UNSTABLE'
                         }
                     }
                 }
@@ -147,8 +166,7 @@ pipeline {
                 always {
                     echo 'Publishing test results...'
                     dir(env.PROJECT_DIR) {
-                        // If you use JUnit/TestNG plugin, you can switch to junit if needed:
-                        // junit 'target/surefire-reports/*.xml'
+                        // Use your preferred publisher (switch to junit if needed)
                         publishTestResults testResultsPattern: 'target/surefire-reports/*.xml'
 
                         archiveArtifacts artifacts: 'test-output/**/*',
