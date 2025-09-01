@@ -1,5 +1,11 @@
 pipeline {
-    agent any
+    agent {
+        docker {
+            image 'maven:3.9.7-eclipse-temurin-21'
+            // helps with sandboxed CI hosts; can omit if not needed
+            args '--privileged'
+        }
+    }
 
     parameters {
         choice(
@@ -14,10 +20,7 @@ pipeline {
         )
     }
 
-    tools {
-        maven 'Maven-3.9.11'
-    }
-
+    // Maven is provided by the container image; no Jenkins "tools" needed
     environment {
         MAVEN_OPTS = '-Xmx1024m'
         PROJECT_DIR = 'SauceDemoSeleniumTest'
@@ -37,11 +40,31 @@ pipeline {
             }
         }
 
+        stage('Prepare browser') {
+            steps {
+                echo 'Installing Google Chrome in the build container...'
+                sh '''
+                  set -eux
+                  apt-get update
+                  apt-get install -y wget gnupg ca-certificates
+                  install -m 0755 -d /etc/apt/keyrings
+                  wget -qO- https://dl.google.com/linux/linux_signing_key.pub | \
+                    gpg --dearmor -o /etc/apt/keyrings/google-linux.gpg
+                  chmod a+r /etc/apt/keyrings/google-linux.gpg
+                  echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-linux.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
+                  apt-get update
+                  apt-get install -y google-chrome-stable
+                  google-chrome --version
+                '''
+            }
+        }
+
         stage('Environment Check') {
             steps {
                 echo 'Checking environment and project structure...'
                 sh 'java -version'
                 sh 'mvn -version'
+                sh 'google-chrome --version || true'
                 sh 'ls -la'
                 sh "ls -la ${env.PROJECT_DIR}/"
                 sh "ls -la ${env.PROJECT_DIR}/src/ || echo 'No src directory'"
@@ -65,7 +88,11 @@ pipeline {
                 echo 'Running Selenium tests...'
                 dir(env.PROJECT_DIR) {
                     script {
+                        // Ensure headless true when BROWSER == chrome-headless
                         def testCommand = "mvn test -P${params.BROWSER}"
+                        if (params.BROWSER == 'chrome-headless') {
+                            testCommand += " -Dheadless=true"
+                        }
 
                         if (params.TEST_SUITE != 'all') {
                             testCommand += " -Dtest=*${params.TEST_SUITE.capitalize()}Test"
@@ -87,13 +114,13 @@ pipeline {
                 always {
                     echo 'Publishing test results...'
                     dir(env.PROJECT_DIR) {
-                        // Publish TestNG results
+                        // Publish TestNG results (adjust to your publisher if needed)
                         publishTestResults testResultsPattern: 'target/surefire-reports/*.xml'
 
                         // Archive screenshots and reports
                         archiveArtifacts artifacts: 'test-output/**/*',
-                                       fingerprint: true,
-                                       allowEmptyArchive: true
+                                         fingerprint: true,
+                                         allowEmptyArchive: true
 
                         // Publish HTML reports if they exist
                         script {
@@ -118,15 +145,12 @@ pipeline {
         always {
             echo 'SauceDemo pipeline execution completed'
         }
-
         success {
             echo 'SauceDemo tests passed successfully!'
         }
-
         failure {
             echo 'SauceDemo pipeline failed!'
         }
-
         unstable {
             echo 'Some SauceDemo tests failed - build is unstable'
         }
