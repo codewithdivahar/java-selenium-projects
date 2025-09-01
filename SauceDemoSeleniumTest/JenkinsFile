@@ -1,23 +1,139 @@
 pipeline {
     agent any
 
+    // Only trigger on main branch
+    when {
+        branch 'main'
+    }
+
+    parameters {
+        choice(
+            name: 'BROWSER',
+            choices: ['chrome-headless', 'chrome'],
+            description: 'Select browser for test execution'
+        )
+        choice(
+            name: 'TEST_SUITE',
+            choices: ['all', 'login', 'products', 'cart'],
+            description: 'Select test suite to run'
+        )
+    }
+
     tools {
-        maven 'Maven-3.9.11'  // This must match your Jenkins Global Tool Configuration
+        maven 'Maven-3.9.11'
     }
 
     environment {
         MAVEN_OPTS = '-Xmx1024m'
+        PROJECT_DIR = 'SauceDemoSeleniumTest'
     }
 
     stages {
+        stage('Checkout') {
+            steps {
+                echo 'Checking out source code from GitHub...'
+                checkout scm
+
+                script {
+                    echo "Branch: ${env.GIT_BRANCH}"
+                    echo "Build Number: ${env.BUILD_NUMBER}"
+                    echo "Working in project: ${env.PROJECT_DIR}"
+                }
+            }
+        }
+
         stage('Environment Check') {
             steps {
-                echo 'Checking environment...'
+                echo 'Checking environment and project structure...'
                 sh 'java -version'
                 sh 'mvn -version'
-                sh 'echo "JAVA_HOME: $JAVA_HOME"'
-                sh 'echo "PATH: $PATH"'
+                sh 'ls -la'
+                sh "ls -la ${env.PROJECT_DIR}/"
+                sh "ls -la ${env.PROJECT_DIR}/src/ || echo 'No src directory'"
             }
+        }
+
+        stage('Build') {
+            steps {
+                echo 'Building the SauceDemo Selenium project...'
+                dir(env.PROJECT_DIR) {
+                    sh 'pwd'
+                    sh 'ls -la'
+                    sh 'mvn clean compile -DskipTests'
+                    echo 'Build completed successfully!'
+                }
+            }
+        }
+
+        stage('Test') {
+            steps {
+                echo 'Running Selenium tests...'
+                dir(env.PROJECT_DIR) {
+                    script {
+                        def testCommand = "mvn test -P${params.BROWSER}"
+
+                        if (params.TEST_SUITE != 'all') {
+                            testCommand += " -Dtest=*${params.TEST_SUITE.capitalize()}Test"
+                        }
+
+                        echo "Executing command: ${testCommand}"
+
+                        try {
+                            sh testCommand
+                            echo "Tests completed successfully!"
+                        } catch (Exception e) {
+                            echo "Tests failed but continuing with reports: ${e.message}"
+                            currentBuild.result = 'UNSTABLE'
+                        }
+                    }
+                }
+            }
+            post {
+                always {
+                    echo 'Publishing test results...'
+                    dir(env.PROJECT_DIR) {
+                        // Publish TestNG results
+                        publishTestResults testResultsPattern: 'target/surefire-reports/*.xml'
+
+                        // Archive screenshots and reports
+                        archiveArtifacts artifacts: 'test-output/**/*',
+                                       fingerprint: true,
+                                       allowEmptyArchive: true
+
+                        // Publish HTML reports if they exist
+                        script {
+                            if (fileExists('test-output')) {
+                                publishHTML([
+                                    allowMissing: true,
+                                    alwaysLinkToLastBuild: true,
+                                    keepAll: true,
+                                    reportDir: 'test-output',
+                                    reportFiles: '*.html',
+                                    reportName: 'SauceDemo Test Report'
+                                ])
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            echo 'SauceDemo pipeline execution completed'
+        }
+
+        success {
+            echo 'SauceDemo tests passed successfully!'
+        }
+
+        failure {
+            echo 'SauceDemo pipeline failed!'
+        }
+
+        unstable {
+            echo 'Some SauceDemo tests failed - build is unstable'
         }
     }
 }
