@@ -1,10 +1,23 @@
 pipeline {
     agent any
 
+    tools {
+        maven 'Maven-3.9.11'  // This must match your Jenkins Global Tool Configuration
+        jdk 'JDK-21'         // This must match your Jenkins Global Tool Configuration
+    }
+
+    environment {
+        MAVEN_OPTS = '-Xmx1024m'
+    }
+
     stages {
-        stage('Hello') {
+        stage('Environment Check') {
             steps {
-                echo 'Hello World - Jenkins is working!'
+                echo 'Checking environment...'
+                sh 'java -version'
+                sh 'mvn -version'
+                sh 'echo "JAVA_HOME: $JAVA_HOME"'
+                sh 'echo "PATH: $PATH"'
             }
         }
     }
