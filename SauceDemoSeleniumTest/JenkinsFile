@@ -1,11 +1,6 @@
 pipeline {
     agent any
 
-    // Only trigger on main branch
-    when {
-        branch 'main'
-    }
-
     parameters {
         choice(
             name: 'BROWSER',
