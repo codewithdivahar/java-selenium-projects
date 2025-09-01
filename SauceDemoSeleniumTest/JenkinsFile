@@ -19,8 +19,12 @@ pipeline {
     }
 
     environment {
-        MAVEN_OPTS = '-Xmx1024m'
-        PROJECT_DIR = 'SauceDemoSeleniumTest'
+        MAVEN_OPTS   = '-Xmx1024m'
+        PROJECT_DIR  = 'SauceDemoSeleniumTest'
+        // Adjust if Chrome installed elsewhere; common path in jenkins/jenkins is /usr/bin/google-chrome
+        CHROME_BIN   = '/usr/bin/google-chrome'
+        // Gives Chrome more shared memory headroom if your runtime honors it
+        _JAVA_OPTIONS = '-Djava.awt.headless=true'
     }
 
     stages {
@@ -36,90 +40,18 @@ pipeline {
             }
         }
 
-        stage('Install Chrome (if missing)') {
-            steps {
-                sh '''
-                  set -eux
-
-                  # Already present?
-                  if command -v google-chrome >/dev/null 2>&1; then
-                    echo "Found existing Chrome: $(google-chrome --version)"
-                    exit 0
-                  fi
-                  if command -v chromium >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1; then
-                    echo "Found existing Chromium."
-                    # Ensure a google-chrome alias exists
-                    if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; else SUDO=""; fi
-                    $SUDO ln -sf "$(command -v chromium || command -v chromium-browser)" /usr/local/bin/google-chrome || true
-                    google-chrome --version || true
-                    exit 0
-                  fi
-
-                  # Detect OS family
-                  OS_ID="$(. /etc/os-release 2>/dev/null || true; echo ${ID:-})"
-                  if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; else SUDO=""; fi
-
-                  if [ "$OS_ID" = "ubuntu" ] || [ "$OS_ID" = "debian" ]; then
-                    # Debian/Ubuntu: install Google Chrome, fallback to Chromium
-                    $SUDO apt-get update
-                    $SUDO apt-get install -y wget gnupg ca-certificates
-                    $SUDO install -m 0755 -d /etc/apt/keyrings
-                    wget -qO- https://dl.google.com/linux/linux_signing_key.pub | \
-                      $SUDO gpg --dearmor -o /etc/apt/keyrings/google-linux.gpg
-                    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-linux.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | \
-                      $SUDO tee /etc/apt/sources.list.d/google-chrome.list
-                    $SUDO apt-get update
-                    # Try Chrome first
-                    $SUDO apt-get install -y google-chrome-stable || true
-
-                    if ! command -v google-chrome >/dev/null 2>&1; then
-                      echo "Chrome install failed or repo blocked; falling back to Chromium."
-                      $SUDO apt-get install -y chromium || $SUDO apt-get install -y chromium-browser || true
-                      if command -v chromium >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1; then
-                        $SUDO ln -sf "$(command -v chromium || command -v chromium-browser)" /usr/local/bin/google-chrome || true
-                      else
-                        echo "ERROR: Could not install Chrome/Chromium on Debian/Ubuntu."
-                        exit 1
-                      fi
-                    fi
-
-                  elif command -v dnf >/dev/null 2>&1; then
-                    # RHEL/CentOS/Rocky/Alma: install Chromium and alias it
-                    $SUDO dnf -y install epel-release || true
-                    $SUDO dnf -y install chromium
-                    if ! command -v chromium >/dev/null 2>&1; then
-                      echo "ERROR: Could not install Chromium with dnf."
-                      exit 1
-                    fi
-                    $SUDO ln -sf "$(command -v chromium)" /usr/local/bin/google-chrome || true
-
-                  elif command -v yum >/dev/null 2>&1; then
-                    $SUDO yum -y install epel-release || true
-                    $SUDO yum -y install chromium
-                    if ! command -v chromium >/dev/null 2>&1; then
-                      echo "ERROR: Could not install Chromium with yum."
-                      exit 1
-                    fi
-                    $SUDO ln -sf "$(command -v chromium)" /usr/local/bin/google-chrome || true
-
-                  else
-                    echo "ERROR: Unsupported OS for auto-install, or missing package manager."
-                    echo "Please install Google Chrome/Chromium manually on this agent."
-                    exit 1
-                  fi
-
-                  google-chrome --version || true
-                '''
-            }
-        }
-
         stage('Environment Check') {
             steps {
                 echo 'Checking environment and project structure...'
-                sh 'java -version'
-                sh 'mvn -version'
-                sh 'google-chrome --version || true'
-                sh 'ls -la'
+                sh '''
+                  set -eux
+                  java -version
+                  mvn -version
+                  which google-chrome || true
+                  google-chrome --version || true
+                  echo "PATH: $PATH"
+                  ls -la
+                '''
                 sh "ls -la ${env.PROJECT_DIR}/"
                 sh "ls -la ${env.PROJECT_DIR}/src/ || echo 'No src directory'"
             }
@@ -129,8 +61,7 @@ pipeline {
             steps {
                 echo 'Building the SauceDemo Selenium project...'
                 dir(env.PROJECT_DIR) {
-                    sh 'pwd'
-                    sh 'ls -la'
+                    sh 'pwd && ls -la'
                     sh 'mvn clean compile -DskipTests'
                     echo 'Build completed successfully!'
                 }
@@ -139,19 +70,22 @@ pipeline {
 
         stage('Test') {
             steps {
-                echo 'Running Selenium tests...'
+                echo 'Running Selenium tests with local Chrome...'
                 dir(env.PROJECT_DIR) {
                     script {
                         def testCommand = "mvn test -P${params.BROWSER}"
+
+                        // Ensure your BaseTest picks up headless mode via -Dheadless=true
                         if (params.BROWSER == 'chrome-headless') {
                             testCommand += " -Dheadless=true"
                         }
+
+                        // Narrow to a suite if requested (matches *LoginTest, *ProductTest, *CartTest)
                         if (params.TEST_SUITE != 'all') {
                             testCommand += " -Dtest=*${params.TEST_SUITE.capitalize()}Test"
                         }
 
                         echo "Executing command: ${testCommand}"
-
                         try {
                             sh testCommand
                             echo "Tests completed successfully!"
@@ -166,7 +100,7 @@ pipeline {
                 always {
                     echo 'Publishing test results...'
                     dir(env.PROJECT_DIR) {
-                        // Use your preferred publisher (switch to junit if needed)
+                        // If you use Jenkins’ JUnit plugin, you can switch to: junit 'target/surefire-reports/*.xml'
                         publishTestResults testResultsPattern: 'target/surefire-reports/*.xml'
 
                         archiveArtifacts artifacts: 'test-output/**/*',
@@ -192,17 +126,9 @@ pipeline {
     }
 
     post {
-        always {
-            echo 'SauceDemo pipeline execution completed'
-        }
-        success {
-            echo 'SauceDemo tests passed successfully!'
-        }
-        failure {
-            echo 'SauceDemo pipeline failed!'
-        }
-        unstable {
-            echo 'Some SauceDemo tests failed - build is unstable'
-        }
+        always   { echo 'SauceDemo pipeline execution completed' }
+        success  { echo 'SauceDemo tests passed successfully!' }
+        failure  { echo 'SauceDemo pipeline failed!' }
+        unstable { echo 'Some SauceDemo tests failed - build is unstable' }
     }
 }
